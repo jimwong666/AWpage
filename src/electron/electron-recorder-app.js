@@ -1,18 +1,21 @@
 /*eslint-env node */
 
-import {Readable} from "stream";
 import {app, session, BrowserWindow, ipcMain, dialog } from "electron";
 import { ElectronRecorder } from "./electron-recorder";
 
 import { ElectronReplayApp, STATIC_PREFIX } from "replaywebpage/src/electron-replay-app";
 
 import path from "path";
+import { PassThrough } from "stream";
 
-import { unusedFilenameSync } from "unused-filename";
+import fs from "fs";
+import util from "util";
+
+
+import { checkPins, ipfsAddWithReplay, ipfsUnpinAll } from "../utils";
+
 
 app.commandLine.appendSwitch("disable-features", "CrossOriginOpenerPolicy");
-
-const IPFS_API_ORIGINS = ["http://localhost:5001", "http://127.0.0.1"];
 
 
 // ===========================================================================
@@ -31,7 +34,6 @@ class ElectronRecorderApp extends ElectronReplayApp
       plugins: true,
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
-      sandbox: false
     };
   }
 
@@ -50,50 +52,19 @@ class ElectronRecorderApp extends ElectronReplayApp
       this.createRecordWindow(opts);
     });
 
-    sesh.on("will-download", (event, item, webContents) => {
-      const origFilename = item.getFilename();
-
-      console.log(`will-download: ${origFilename}`);
-
-      item.setSavePath(unusedFilenameSync(path.join(app.getPath("downloads"), origFilename)));
-
-      ipcMain.on("dlcancel:" + origFilename, () => {
-        console.log(`Canceled download for ${origFilename} to ${item.getSavePath()}`);
-        item.cancel();
-      });
-
-      item.on("updated", (_, state) => {
-        const filename = item.getSavePath();
-
-        const dlprogress = {
-          filename,
-          origFilename,
-          currSize: item.getReceivedBytes(),
-          totalSize: item.getTotalBytes(),
-          startTime: item.getStartTime(),
-          state,
-        };
-
-        try {
-          webContents.send("download-progress", dlprogress);
-        } catch (e) {
-          console.log("download update failed", e);
-        }
-      });
-
-      item.once("done", (event, state) => {
-        const dlprogress = {
-          origFilename,
-          state
-        };
-        try {
-          webContents.send("download-progress", dlprogress);
-        } catch (e) {
-          console.log("download update failed", e);
-        }
-      });
-
+    ipcMain.on("start-ipfs", (event, validPins) => {
+      this.ipfsStart(validPins);
     });
+
+    ipcMain.on("ipfs-pin", (event, reqId, filename) => {
+      this.ipfsPin(event, reqId, filename);
+    });
+
+    ipcMain.on("ipfs-unpin", (event, reqId, pinList) => {
+      this.ipfsUnpin(event, reqId, pinList);
+    });
+
+    //require('@electron/remote/main').initialize();
 
     super.onAppReady();
   }
@@ -151,7 +122,7 @@ class ElectronRecorderApp extends ElectronReplayApp
     const recWindow = new BrowserWindow({
       width: this.screenSize.width,
       height: this.screenSize.height,
-      //isMaximized: true,
+      isMaximized: true,
       show: true,
       webPreferences: {
         contextIsolation: true,
@@ -255,45 +226,46 @@ class ElectronRecorderApp extends ElectronReplayApp
     }
   }
 
-  async doIntercept(request, callback) {
-    const {url, headers} = request;
-    const origin = new URL(url).origin;
+  async ipfsStart(validPins) {
+    await this.ipfsClient.initIPFS();
 
-    if (IPFS_API_ORIGINS.includes(origin)) {
-      delete headers.Referrer;
-      headers.Origin = new URL(url).origin;
+    checkPins(this.ipfsClient, validPins);
+  }
+
+  async ipfsPin(event, reqId, filename) {
+    let downloadStream = new PassThrough();
+
+    ipcMain.on(reqId, (event, data) => {
+      downloadStream.push(data);
+      if (!data) {
+        ipcMain.removeAllListeners(reqId);
+      }
+    });
+
+    await this.ipfsClient.initIPFS();
+
+    const readFile = (fileName) => util.promisify(fs.readFile)(fileName);
+
+    const swContent = await readFile(path.join(this.staticContentPath, "replay", "sw.js"));
+    const uiContent = await readFile(path.join(this.staticContentPath, "replay", "ui.js"));
+
+    //const data = await ipfsAddPin(this.ipfsClient, filename, downloadStream);
+    const data = await ipfsAddWithReplay(this.ipfsClient, filename, downloadStream,
+      swContent, uiContent);
+
+    console.log("ipfs added: " + data.url);
+
+    event.reply(reqId, data);
+  }
+
+  async ipfsUnpin(event, reqId, pinList) {
+    if (pinList && pinList.length) {
+      await this.ipfsClient.initIPFS();
+      await ipfsUnpinAll(this.ipfsClient, pinList);
     }
 
-    return super.doIntercept(request, callback);
-  }
-
-  async proxyLive(request, callback) {
-    let headers = request.headers;
-    const {method, url, uploadData} = request;
-
-    const body = uploadData ? Readable.from(readBody(uploadData, session.defaultSession)) : null;
-
-    const response = await fetch(url, {method, headers, body});
-    const data = method === "HEAD" ? null : response.body;
-    const statusCode = response.status;
-
-    headers = Object.fromEntries(response.headers.entries());
-    callback({statusCode, headers, data});
+    event.reply(reqId);
   }
 }
-
-async function * readBody (body, session) {
-  for (const chunk of body) {
-    if (chunk.bytes) {
-      yield await Promise.resolve(chunk.bytes);
-    } else if (chunk.blobUUID) {
-      yield await session.getBlobData(chunk.blobUUID);
-    }
-    // } else if (chunk.file) {
-    //   yield * Readable.from(fs.createReadStream(chunk.file));
-    // }
-  }
-}
-
 
 export { ElectronRecorderApp };

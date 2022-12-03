@@ -9,16 +9,11 @@ import fasPlus from "@fortawesome/fontawesome-free/svgs/solid/plus.svg";
 import fasUpload from "@fortawesome/fontawesome-free/svgs/solid/upload.svg";
 //import fasCog from "@fortawesome/fontawesome-free/svgs/solid/cog.svg";
 
-import "./coll";
 import "./coll-info";
 import "./coll-index";
-import "./recordembed";
 
 import wrRec from "../../assets/recLogo.svg";
 import wrLogo from "../../assets/awp-logo.svg";
-import prettyBytes from "pretty-bytes";
-
-import { create as createAutoIpfs, DaemonAPI, Web3StorageAPI } from "auto-js-ipfs";
 
 
 // eslint-disable-next-line no-undef
@@ -35,10 +30,6 @@ class ArchiveWebApp extends ReplayWebApp
     this.showCollDrop = false;
     this.colls = [];
     this.autorun = localStorage.getItem("autorunBehaviors") === "1";
-
-    if (window.archivewebpage) {
-      window.archivewebpage.setDownloadCallback((progress) => this.onDownloadProgress(progress));
-    }
   }
 
   get appName() {
@@ -59,49 +50,18 @@ class ArchiveWebApp extends ReplayWebApp
 
       showNew: { type: String },
       showImport: { type: Boolean },
-      isImportExisting: { type: Boolean },
-
-      loadedCollId: { type: String },
-
-      showDownloadProgress: { type: Boolean },
-      download: { type: Object },
-
-      ipfsDaemonUrl: { type: String }
+      isImportExisting: { type: Boolean }
     };
   }
 
   initRoute() {
+    this.inited = true;
     const pageParams = new URLSearchParams(window.location.search);
 
-    if (pageParams.has("config")) {
-      super.initRoute();
-
-      this.handleMessages();
-
-    } else {
-      this.inited = true;
-      this.sourceUrl = pageParams.get("source") || "";
-    }
-
-    this.checkIPFS();
-  }
-
-  handleMessages() {
-    // support upload
-    window.addEventListener("message", async (event) => {
-      if (this.embed && this.loadedCollId && typeof(event.data) === "object" && event.data.msg_type === "downloadToBlob") {
-        const download = await fetch(`${apiPrefix}/c/${this.loadedCollId}/dl?format=wacz&pages=all`);
-        const blob = await download.blob();
-        event.source.postMessage({msg_type: "downloadedBlob", coll: this.loadedCollId, url: URL.createObjectURL(blob)});
-      }
-    });
+    this.sourceUrl = pageParams.get("source") || "";
   }
 
   onStartLoad(event) {
-    if (this.embed) {
-      return;
-    }
-    
     this.showImport = false;
     this.sourceUrl = event.detail.sourceUrl;
     this.loadInfo = event.detail;
@@ -117,10 +77,6 @@ class ArchiveWebApp extends ReplayWebApp
         const msg = {"msg_type": "reload", "full": true, "name": this.loadInfo.importCollId};
         navigator.serviceWorker.controller.postMessage(msg);
       }
-    }
-
-    if (this.embed) {
-      this.loadedCollId = event.detail.collInfo && event.detail.collInfo.coll;
     }
 
     super.onCollLoaded(event);
@@ -145,7 +101,7 @@ class ArchiveWebApp extends ReplayWebApp
   async disableCSP() {
     // necessary for chrome 94> up due to new bug introduced
     // 
-    if (this.embed || (!self.chrome || !self.chrome.runtime)) {
+    if (!self.chrome || !self.chrome.runtime) {
       return;
     }
 
@@ -218,11 +174,6 @@ class ArchiveWebApp extends ReplayWebApp
         margin-left: auto;
         max-width: 300px;
       }
-
-      .dl-progress {
-        display: flex;
-        flex-direction: column;
-      }
   
       @media screen and (max-width: 768px) {
         #url {
@@ -294,8 +245,6 @@ class ArchiveWebApp extends ReplayWebApp
       <wr-rec-coll-index
        dateName="Date Created"
        headerName="Current Web Archives"
-       .ipfsDaemonUrl=${this.ipfsDaemonUrl}
-       .ipfsMessage=${this.ipfsMessage}
        @show-start=${this.onShowStart}
        @show-import=${this.onShowImport}
        @colls-updated=${this.onCollsLoaded}
@@ -310,7 +259,6 @@ class ArchiveWebApp extends ReplayWebApp
     ${this.showStartRecord ? this.renderStartModal() : ""}
     ${this.showNew ? this.renderNewCollModal() : ""}
     ${this.showImport ? this.renderImportModal() : ""}
-    ${this.showDownloadProgress && this.download ? this.renderDownloadModal() : ""}
     ${super.render()}`;
   }
 
@@ -318,17 +266,10 @@ class ArchiveWebApp extends ReplayWebApp
     return html`
     <wr-rec-coll 
     .editable="${true}"
-    .clearable="${this.embed}"
-    .browsable="${!this.embed}"
     .loadInfo="${this.getLoadInfo(this.sourceUrl)}"
     .appLogo="${this.mainLogo}"
-    .autoUpdateInterval=${this.embed || this.showDownloadProgress ? 0 : 10}
-    .ipfsDaemonUrl=${this.ipfsDaemonUrl}
-    .ipfsMessage=${this.ipfsMessage}
-    embed="${this.embed}"
     sourceUrl="${this.sourceUrl}"
     appName="${this.appName}"
-    appVersion=${VERSION}
     @replay-favicons=${this.onFavIcons}
     @update-title=${this.onTitle}
     @coll-loaded=${this.onCollLoaded}
@@ -425,86 +366,13 @@ class ArchiveWebApp extends ReplayWebApp
     </wr-modal`;
   }
 
-  renderDownloadModal() {
-    const renderDLStatus = () => {
-      switch (this.download.state) {
-      case "progressing":
-        return html`
-          <button @click="${this.onDownloadCancel}" class="button is-danger">Cancel Download</button>
-          `;
-
-      case "interrupted":
-        return html`
-          <p class="has-text-weight-bold has-text-danger">The download was interrupted</p>
-          <button @click="${this.onDownloadCancel}" class="button">Close</button>
-          `;
-    
-      case "cancelled":
-        return html`
-          <p class="has-text-weight-bold has-text-danger">The download was canceled</p>
-          <button @click="${this.onDownloadCancel}" class="button">Close</button>
-          `;
-
-      case "completed":
-        return html`
-          <p class="has-text-weight-bold has-text-primary">Download Completed!</p>
-          <button @click="${this.onDownloadCancel}" class="button">Close</button>
-          `;
-      }
-    };
-
-    return html`
-    <wr-modal .noBgClose=${true} style="--modal-width: 740px" @modal-closed="${() => this.showDownloadProgress = false}" title="Download Progress">
-      <div class="dl-progress">
-        <div>Downloading to: <i>${this.download.filename}</i></div>
-        <div>Size Downloaded: <b>${prettyBytes(this.download.currSize)}</b></div>
-        <div>Time Elapsed: ${Math.round((Date.now() / 1000) - this.download.startTime)} seconds</div>
-
-        <div class="has-text-centered">
-        ${renderDLStatus()}
-        </div>
-      </div>
-    </wr-modal>`;
-  }
-
-  onDownloadProgress(progress) {
-    if (progress.filename) {
-      this.showDownloadProgress = true;
-      this.download = progress;
-    } else if (this.download) {
-      this.download = {...this.download, state: progress.state};
-    }
-  }
-
-  onDownloadCancel() {
-    if (window.archivewebpage) {
-      if (this.download && this.download.state === "progressing") {
-        window.archivewebpage.downloadCancel(this.download);
-      } else {
-        this.showDownloadProgress = false;
-      }
-    }
-  }
-
-  getDeployType() {
-    if (IS_APP) {
-      return "App";
-    }
-
-    if (this.embed) {
-      return "Embedded";
-    }
-
-    return "Extension";
-  }
-
   renderAbout() {
     return html`
       <div class="modal is-active">
         <div class="modal-background" @click="${this.onAboutClose}"></div>
           <div class="modal-card">
             <header class="modal-card-head">
-              <p class="modal-card-title">About ArchiveWeb.page ${this.getDeployType()}</p>
+              <p class="modal-card-title">About ArchiveWeb.page ${IS_APP ? "App" : "Extension"}</p>
               <button class="delete" aria-label="close" @click="${this.onAboutClose}"></button>
             </header>
             <section class="modal-card-body">
@@ -513,7 +381,7 @@ class ArchiveWebApp extends ReplayWebApp
                   <div class="is-flex">
                     <div class="has-text-centered" style="width: 220px">
                       <fa-icon class="logo" size="48px" .svg="${wrLogo}"></fa-icon>
-                      <div style="font-size: smaller; margin-bottom: 1em">${this.getDeployType()} v${VERSION}</div>
+                      <div style="font-size: smaller; margin-bottom: 1em">${IS_APP ? "App" : "Extension"} v${VERSION}</div>
                     </div>
 
                     ${IS_APP ? html`
@@ -584,21 +452,7 @@ class ArchiveWebApp extends ReplayWebApp
     this.selCollId = event.currentTarget.value;
   }
 
-  setDefaultColl() {
-    if (!this.selCollId) {
-      this.selCollId = localStorage.getItem("defaultCollId");
-    }
-    if (!this.selCollId && this.colls && this.colls.length) {
-      this.selCollId = this.colls[0].id;
-    }
-  }
-
-  _setCurrColl(event) {
-    if (!(event instanceof CustomEvent)) {
-      this.setDefaultColl();
-      return;
-    }
-    const { detail } = event;
+  _setCurrColl(detail) {
     this.selCollId = detail.coll;
     //this.selCollTitle = event.detail.title;
     if (!this.colls || !this.colls.length) {
@@ -610,21 +464,20 @@ class ArchiveWebApp extends ReplayWebApp
   }
 
   async onShowStart(event) {
-    this._setCurrColl(event);
+    this._setCurrColl(event.detail);
     this.recordUrl = event.detail.url || "https://example.com/";
     this.showStartRecord = true;
   }
 
   onShowImport(event) {
-    this._setCurrColl(event);
+    this._setCurrColl(event.detail);
     this.showImport = true;
     this.isImportExisting = true;
   }
 
   onCollsLoaded(event) {
     this.colls = event.detail.colls;
-    //this.selCollId = this.colls && this.colls.length ? this.colls[0].id: null;
-    this.setDefaultColl();
+    this.selCollId = this.colls && this.colls.length ? this.colls[0].id: null;
   }
 
   onStartRecord(event) {
@@ -651,45 +504,6 @@ class ArchiveWebApp extends ReplayWebApp
       window.archivewebpage.record({url, collId, startRec, autorun});
     }
     return false;
-  }
-
-  async onTitle(event) {
-    super.onTitle(event);
-
-    if (this.embed && this.loadedCollId && event.detail.replayTitle && event.detail.title) {
-      try {
-        await fetch(`${apiPrefix}/c/${this.loadedCollId}/pageTitle`, {method: "POST", body: JSON.stringify(event.detail)});
-      } catch (e) {
-        console.warn(e);
-      }
-    }
-  }
-
-  async checkIPFS() {
-    // use auto-js-ipfs to get possible local daemon url (eg. for Brave)
-    // if so, send it to the service worker
-
-    let ipfsDaemonUrl;
-    let ipfsMessage;
-
-    // eslint-disable-next-line no-undef
-    const autoipfs = await createAutoIpfs({web3StorageToken: __WEB3_STORAGE_TOKEN__});
-    if (autoipfs instanceof DaemonAPI) {
-      ipfsDaemonUrl = autoipfs.url;
-    }
-    if (autoipfs instanceof Web3StorageAPI) {
-      ipfsMessage = "Sharing via remote web3.storage";
-    } else if (!ipfsDaemonUrl) {
-      ipfsMessage = "IPFS Access Unknown - Sharing Not Available"; 
-    } else if (ipfsDaemonUrl.startsWith("http://localhost:45")) {
-      ipfsMessage = "Sharing via Brave IPFS node";
-    } else if (ipfsDaemonUrl.startsWith("http://localhost")) {
-      ipfsMessage = "Sharing via local IPFS node";
-    } else {
-      ipfsMessage = "";
-    }
-    this.ipfsDaemonUrl = ipfsDaemonUrl;
-    this.ipfsMessage = ipfsMessage;
   }
 }
 
